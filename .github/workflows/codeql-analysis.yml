@@ -40,8 +40,8 @@ jobs:
               ["cpp"]="c-cpp"
               ["cs"]="csharp"
               ["go"]="go"
-              ["java"]="java"
-              ["kt"]="kotlin"
+              ["java"]="java-kotlin"
+              ["kt"]="java-kotlin"
               ["rb"]="ruby"
               ["swift"]="swift"
               ["js"]="javascript-typescript"
@@ -80,7 +80,7 @@ jobs:
           echo "Detected languages: $detected_langs"
 
           # Define CodeQL-supported languages
-          codeql_langs='["c-cpp", "csharp", "go", "javascript-typescript", "python", "ruby", "swift"]'
+          codeql_langs='["c-cpp", "csharp", "go", "java-kotlin", "javascript-typescript", "python", "ruby", "swift"]'
 
           # Filter detected languages to include only CodeQL-supported ones
           filtered_codeql_langs=$(echo "$detected_langs" | jq -c --argjson codeql "$codeql_langs" '[.[] | select(. as $lang | $codeql | index($lang))]')
@@ -106,12 +106,18 @@ jobs:
   #       uses: actions/checkout@v4
 
   #     - name: Get Horusec config file
-  #       uses: meltwater/sec-global-gh-actions/.github/actions/horusec-config@main
+  #       uses: meltwater/sec-global-gh-actions/.github/actions/horusec-config@NIGHT-668
+
+  #     - name: Install Docker
+  #       run: |
+  #         echo "Installing Docker..."
+  #         curl -fsSL https://get.docker.com -o get-docker.sh | bash -s get-docker.sh
+  #         docker version  
 
   #     - name: Run Horusec Scan
   #       run: |
   #         echo "Installing Horusec..."
-  #         curl -fsSL https://raw.githubusercontent.com/ZupIT/horusec/main/deployments/scripts/install.sh | bash -s latest
+  #         curl -fsSL https://raw.githubusercontent.com/ZupIT/horusec/main/deployments/scripts/install.sh | bash -s latest-beta
   #         echo "Running Horusec Scan for non-CodeQL languages..."
   #         horusec start -p . --config-file-path="./horusec-config.json"
 
@@ -121,6 +127,7 @@ jobs:
   #         sarif_file: ./horusec.sarif
   #         category: Horusec
   #       continue-on-error: true
+
 
   codeql-scan:
     if: needs.detect_repo_languages.outputs.filtered_languages != '[]' # Only run if there are CodeQL languages
@@ -132,13 +139,15 @@ jobs:
       packages: read
       actions: read
       contents: read
+    env:
+      MAVEN_ARGS: --batch-mode -T 1C -gs settings.xml
 
     strategy:
       fail-fast: false
       matrix:
         language: ${{ fromJson(needs.detect_repo_languages.outputs.filtered_languages) }}
-        exclude:
-          - language: "java-kotlin" # Exclude java-kotlin from CodeQL scan
+        # exclude:
+        #   - language: "java-kotlin" # Exclude java-kotlin from CodeQL scan
 
     steps:
       - name: Checkout repository
@@ -150,6 +159,13 @@ jobs:
           # Set build mode based on language
           if [[ "${{ matrix.language }}" == "c-cpp" || "${{ matrix.language }}" == "csharp" || "${{ matrix.language }}" == "go" || "${{ matrix.language }}" == "swift" ]]; then
             echo "build-mode=autobuild" >> $GITHUB_ENV
+          elif [[ "${{ matrix.language }}" == "java-kotlin" ]]; then
+            # Check for presence of Maven (pom.xml) or Gradle (build.gradle) files
+            if [[ -f "pom.xml" || -f "build.gradle" || -f "build.gradle.kts" ]]; then
+              echo "build-mode=manual" >> $GITHUB_ENV
+            else
+              echo "build-mode=autobuild" >> $GITHUB_ENV
+            fi
           else
             echo "build-mode=none" >> $GITHUB_ENV
           fi
@@ -160,6 +176,39 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ env.build-mode }}
 
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'liberica'
+          architecture: x64
+          cache: 'maven'
+
+      - name: Build Java/Kotlin Project with Maven/Gradle
+        id: maven-gradle-build
+        env:
+          SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+        if: ${{ env.build-mode == 'manual' }}
+        run: |
+          # Check for Maven Wrapper or pom.xml and run the appropriate command
+          if [[ -f "pom.xml" && ! -f "mvnw" && ! -f "mvnw.cmd" ]]; then
+            # If pom.xml exists but no Maven Wrapper, use mvn clean install
+            echo "pom.xml found, running mvn clean install..."
+            mvn clean install
+          elif [[ -f "pom.xml" && ( -f "mvnw" || -f "mvnw.cmd" ) ]]; then
+            # If pom.xml exists and mvnw or mvnw.cmd are found, use the Maven Wrapper
+            echo "${SETTINGS_XML}" > settings.xml
+            cat settings.xml
+            ./mvnw install -am -DenableLogback -DskipTests
+          elif [[ -f "build.gradle" || -f "build.gradle.kts" ]]; then
+            # If Gradle build files are found, use Gradle
+            echo "Building using Gradle..."
+            ./gradlew clean build
+          else
+            # If no recognized build file is found, skip the build
+            echo "No recognized build file found. Skipping build."
+          fi
+
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
         with:
@@ -168,9 +217,94 @@ jobs:
 
   security-post-check:
     needs:
+      # - horusec-scan
       - codeql-scan
     runs-on: ubuntu-latest
     steps:
       - name: Validate Scans
         run: |
           echo "Security check done..."
+
+  # codeql-scan:
+  #   if: needs.detect_repo_languages.outputs.filtered_languages != '[]' # Only run if there are CodeQL languages
+  #   needs: detect_repo_languages
+  #   name: Analyze (${{ matrix.language }})
+  #   runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+  #   permissions:
+  #     security-events: write
+  #     packages: read
+  #     actions: read
+  #     contents: read
+  #   env:
+  #     MAVEN_ARGS: --batch-mode -T 1C -gs settings.xml
+    
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       language: ${{ fromJson(needs.detect_repo_languages.outputs.filtered_languages) }}
+  #       exclude:
+  #         - language: "java-kotlin" # Exclude java-kotlin from CodeQL scan
+        
+  #   steps:
+  #     - name: Checkout repository
+  #       uses: actions/checkout@v4
+    
+      # - name: Set Build Mode
+      #   id: set-build-mode
+      #   run: |
+      #     # Set build mode based on language
+      #     if [[ "${{ matrix.language }}" == "c-cpp" || "${{ matrix.language }}" == "csharp" || "${{ matrix.language }}" == "go" || "${{ matrix.language }}" == "swift" ]]; then
+      #       echo "build-mode=autobuild" >> $GITHUB_ENV
+      #     elif [[ "${{ matrix.language }}" == "java-kotlin" ]]; then
+      #       # Check for presence of Maven (pom.xml) or Gradle (build.gradle) files
+      #       if [[ -f "pom.xml" || -f "build.gradle" || -f "build.gradle.kts" ]]; then
+      #         echo "build-mode=manual" >> $GITHUB_ENV
+      #       else
+      #         echo "build-mode=autobuild" >> $GITHUB_ENV
+      #       fi
+      #     else
+      #       echo "build-mode=none" >> $GITHUB_ENV
+      #     fi
+    
+      # - name: Build Java/Kotlin Project
+      #   if: ${{ env.build-mode == 'manual' }}
+      #   run: |
+      #     # Check for Maven and Gradle configuration files, and build accordingly
+      #     if [[ -f "pom.xml" ]]; then
+      #       echo "Building using Maven..."
+      #       mvn clean install
+      #     elif [[ -f "build.gradle" || -f "build.gradle.kts" ]]; then
+      #       echo "Building using Gradle..."
+      #       ./gradlew build
+      #     else
+      #       echo "No recognized build file found. Skipping build."
+      #     fi
+    
+      # - name: Initialize CodeQL
+      #   uses: github/codeql-action/init@v3
+      #   with:
+      #     languages: ${{ matrix.language }}
+      #     build-mode: ${{ env.build-mode }}
+
+      # - name: Setup Java
+      #   uses: actions/setup-java@v4
+      #   with:
+      #     java-version: '21'
+      #     distribution: 'liberica'
+      #     architecture: x64
+      #     cache: 'maven'
+
+      # - name: Maven build
+      #   id: maven-build
+      #   env:
+      #     SETTINGS_XML: ${{ secrets.MAVEN_SETTINGS_XML }}
+      #   run: |
+      #     echo "${SETTINGS_XML}" > settings.xml;
+      #     cat settings.xml
+      #     ./mvnw install -am -DenableLogback -DskipTests
+
+      # - name: Perform CodeQL Analysis
+      #   uses: github/codeql-action/analyze@v3
+      #   with:
+      #     category: "/language:${{matrix.language}}"
+      #   continue-on-error: true
